@@ -9,7 +9,11 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_background_service_android/flutter_background_service_android.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:get_storage/get_storage.dart';
+import 'package:isar/isar.dart';
+import 'package:path_provider/path_provider.dart';
+
+import 'domains/entities/position.dart';
 
 Future<void> initializeService() async {
   final service = FlutterBackgroundService();
@@ -30,7 +34,7 @@ Future<void> initializeService() async {
     await flutterLocalNotificationsPlugin.initialize(
       const InitializationSettings(
         iOS: DarwinInitializationSettings(),
-        android: AndroidInitializationSettings('ic_bg_service_small'),
+        android: AndroidInitializationSettings('notification'),
       ),
     );
   }
@@ -44,11 +48,9 @@ Future<void> initializeService() async {
     androidConfiguration: AndroidConfiguration(
       // this will be executed when app is in foreground or background in separated isolate
       onStart: onStart,
-
       // auto start service
       autoStart: true,
       isForegroundMode: true,
-
       notificationChannelId: 'geo_plus_foreground',
       initialNotificationTitle: 'GEO+ SERVICE',
       initialNotificationContent: 'Initializing',
@@ -73,22 +75,18 @@ Future<void> initializeService() async {
 Future<bool> onIosBackground(ServiceInstance service) async {
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
-
-  SharedPreferences preferences = await SharedPreferences.getInstance();
-  await preferences.reload();
-  final log = preferences.getStringList('log') ?? <String>[];
-  log.add(DateTime.now().toIso8601String());
-  await preferences.setStringList('log', log);
-
   return true;
 }
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
-  SharedPreferences preferences = await SharedPreferences.getInstance();
-  await preferences.setString("hello", "world");
-
+  final box = GetStorage();
+  final dir = await getApplicationDocumentsDirectory();
+  Isar isar = await Isar.open(
+    [PositionEntitySchema],
+    directory: dir.path,
+  );
   final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
       FlutterLocalNotificationsPlugin();
 
@@ -116,23 +114,17 @@ void onStart(ServiceInstance service) async {
       final androidInfo = await deviceInfo.androidInfo;
 
       device = androidInfo.model;
-      data['device'] = {
-        "model": device,
-        'id': androidInfo.id,
-        'serialNumber': androidInfo.serialNumber,
-        'version': androidInfo.version.release
-      };
+      data['deviceId'] = androidInfo.id;
+      data['model'] = device;
+      data['version'] = androidInfo.version.release.toString();
     }
 
     if (Platform.isIOS) {
       final iosInfo = await deviceInfo.iosInfo;
       device = iosInfo.model;
-      data['device'] = {
-        "model": device,
-        'id': iosInfo.identifierForVendor,
-        'serialNumber': iosInfo.localizedModel,
-        'version': iosInfo.systemVersion
-      };
+      data['deviceId'] = iosInfo.identifierForVendor;
+      data['model'] = device;
+      data['version'] = iosInfo.systemVersion.toString();
     }
     try {
       Position position = await _determinePosition();
@@ -146,7 +138,7 @@ void onStart(ServiceInstance service) async {
               android: AndroidNotificationDetails(
                 'geo_plus_foreground',
                 'GEO+ SERVICE',
-                icon: 'ic_bg_service_small',
+                icon: 'notification',
                 ongoing: true,
               ),
             ),
@@ -154,7 +146,8 @@ void onStart(ServiceInstance service) async {
           // if you don't using custom notification, uncomment this
           service.setForegroundNotificationInfo(
             title: "Geo+ Service",
-            content: "Long: ${position.longitude}; Lat: ${position.latitude}",
+            content:
+                "Long: ${position.longitude}; Lat: ${position.latitude} Speed: ${position.speed}",
           );
         }
       }
@@ -163,16 +156,24 @@ void onStart(ServiceInstance service) async {
         {
           "position": {
             'lat': position.latitude,
-            'long': position.longitude
+            'long': position.longitude,
+            ...position.toJson()
           },
-          "device": data['device'],
+          "device": {
+            "model": data['model'],
+            "deviceId": data['deviceId'],
+            "version": data['version'].toString()
+          },
         },
       );
-      data['position'] = position.toJson();
+      data['positions'] = [position.toJson()];
+
       /// send to url
-      debugPrint('FLUTTER BACKGROUND SERVICE DEVICE : ${data.toString()}');
-      await _sendData(data);
-    } catch (e) {}
+      await _sendData(
+          isar, box, data, position, position.toJson()['timestamp']);
+    } catch (e) {
+      debugPrint('ERROR : ${e.toString()}');
+    }
   });
 }
 
@@ -180,13 +181,35 @@ Future<Position> _determinePosition() async {
   return await Geolocator.getCurrentPosition();
 }
 
-Future _sendData(Map<String, dynamic> data) async {
-  SharedPreferences preference = await SharedPreferences.getInstance();
-  String? serverUrl = preference.getString('SERVER_URL');
-  if (serverUrl != null) {
-    final formData = FormData.fromMap(data);
+Future _sendData(Isar isar, GetStorage box, Map<String, dynamic> data,
+    Position position, int timestamp) async {
+  String? serverUrl = box.read<String>('SERVER_URL');
+  int lastTimestamp = box.read<int>('timestamp') ?? 0;
+  if (serverUrl != null && timestamp != lastTimestamp) {
     try {
-      await Dio().post(serverUrl, data: formData);
-    } catch (e) {}
+      final positions =
+          await isar.positionEntitys.where().sortByTimestamp().findAll();
+
+      await Dio().post(serverUrl,
+          data: {
+            ...data,
+            'position': [...data['position'], positions.map((e) => e.toJson())]
+          },
+          options: Options(headers: {"Content-Type": "application/json"}));
+      box.write('timestamp', timestamp);
+      await isar.positionEntitys.where().deleteAll();
+    } catch (e) {
+      final savedP = await isar.positionEntitys
+          .filter()
+          .timestampEqualTo(position.timestamp?.millisecondsSinceEpoch)
+          .findFirst();
+      if (savedP == null) {
+        final p = PositionEntity.fromJson(position.toJson());
+        await isar.writeTxn(() async {
+          return await isar.positionEntitys.put(p);
+        });
+        debugPrint("ISAR : data saved ${p.toJson()}");
+      }
+    }
   }
 }

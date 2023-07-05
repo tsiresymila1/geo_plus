@@ -49,22 +49,30 @@ class _HomePageState extends State<HomePage> {
         elevation: 1,
         title: const Text(
           'GEO+',
-          style: TextStyle(color: Colors.deepPurple),
+          style: TextStyle(color: Colors.lightBlue),
         ),
       ),
       drawer:  Drawer(
         child: Column(
           children: [
-            const SizedBox(
+             SizedBox(
               width: double.infinity,
               child: DrawerHeader(
                   margin: EdgeInsets.zero,
-                  decoration: BoxDecoration(color: Colors.deepPurple),
+                  decoration: const BoxDecoration(color: Colors.lightBlue),
                   child: Center(
-                    child: Text(
-                      'GEO+',
-                      style: TextStyle(
-                          color: Colors.white, fontWeight: FontWeight.bold),
+                    child: Column(
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Image.asset("assets/ic_launcher.png", height: 80,),
+                        ),
+                        const Text(
+                          'GEO+',
+                          style: TextStyle(
+                              color: Colors.white, fontWeight: FontWeight.bold),
+                        ),
+                      ],
                     ),
                   )),
             ),
@@ -92,10 +100,13 @@ class _HomePageState extends State<HomePage> {
                 }
                 final data = snapshot.data!;
                 Map<String, dynamic>? device = data["device"];
+                debugPrint("DATA :: ${data.toString()}");
                 Map<String, dynamic>? position = data["position"];
                 return Column(
                   children: [
                     Text("Model : ${device?['model'] ?? 'Unknown'}"),
+                    Text("Device ID : ${device?['deviceId'] ?? 'Unknown'}"),
+                    Text("Version : ${device?['version'] ?? 'Unknown'}"),
                     Text("Latitude: ${position?['lat']}"),
                     Text("Longitude: ${position?['long']}"),
                   ],
